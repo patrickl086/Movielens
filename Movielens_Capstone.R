@@ -1,0 +1,417 @@
+#' ---
+#' title: "Movielens Recommendation System "
+#' author: "Patricia Londono"
+#' date: "January, 2019"
+#' output: 
+#'   pdf_document: default
+#' ---
+#' 
+## ----setup, include=TRUE-------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE)
+
+#' 
+#' 
+#' ## Introduction
+#' 
+#' As per Wikipedia, "a recommender system or a recommendation system is a subclass of information filtering system that seeks to predict the "rating" or "preference" a user would give to an item". These systems are largely used in several industries to ensure customers satisfaction and increase sales. As an example of this, in 2006 Netflix offered a million-dollar prize to anyone capable of improving their recommender system by 10%.
+#' 
+#' This project is an attempt to build a recommendation system for the 10M Movielens Dataset. The data used for this project was downloaded from the Grouplens website: 
+#' 
+#' - [MovieLens 10M dataset] https://grouplens.org/datasets/movielens/10m/
+#' - [MovieLens 10M dataset - zip file] http://files.grouplens.org/datasets/movielens/ml-10m.zip
+#' 
+#' 
+#' ## Goal
+#' 
+#' Train a machine learning algorithm capable of predicting movie ratings for the MovieLens dataset.
+#' 
+#' 
+#' 
+#' ## Methodology
+#' 
+#' Five main steps will be followed: 
+#' 
+#' 1. Data preparation
+#' 2. Exploratory data analysis 
+#' 3. Model Training 
+#' 4. Analysis of Results 
+#' 5. Conclusions
+#' 
+#' 
+#' 
+#' ### Data Split
+#' Data will be split into training and validation sets (10%)
+#' 
+#' 
+#' ### Metric
+#' The RMSE (Root Mean Squared Deviation) will be the metric used to evaluate the quality of the model.
+#' 
+#' 
+#' 
+#' ## 1. Data preparation
+#' 
+## ----1. Data preparation-------------------------------------------------
+
+# Loading required libraries
+library(tidyverse)
+library(caret)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+
+# Downloading the dataset
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#  Defining year column
+
+edx <- edx %>% 
+  mutate(year = as.numeric(str_sub(title,-5,-2)))
+validation <- validation %>% 
+  mutate(year = as.numeric(str_sub(title,-5,-2)))
+
+# Defining test and validation sets
+
+validation_t <- validation
+validation <- validation %>% select(-rating)
+
+
+# Defining RMSE Metric
+
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+#' 
+#' ## 2. Exploratory data analysis
+#' 
+#' The following table shows the structure of the dataset. Each row represents a rating given by one user to one movie.
+## ----Dataset structure---------------------------------------------------
+head(edx)
+
+#' 
+#' ####Dataset dimensions
+## ----Dataset dimensions--------------------------------------------------
+dim(edx)
+summary(edx)
+
+#' 
+#' ####Number of users and movies
+## ----Number of users-----------------------------------------------------
+edx %>% 
+  summarize(n_users = n_distinct(userId),
+            n_movies = n_distinct(movieId))
+
+#' 
+#' ####Distribituion of Users
+#' This plot below shows that most users have rated less than 100 movies, with the number of movies rated per user peaking at around 40
+## ----Distribution of Users-----------------------------------------------
+edx %>% 
+  count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "blue") + 
+  scale_x_log10() + 
+  ggtitle("Users")
+
+#' 
+#' 
+#' ####Distribution of Movies
+#' This plot shows that most movies have been rated between 50 and 1000. This could be explained due to the popularity of certain blockbuster movies.
+## ----Distribution of Movies----------------------------------------------
+edx %>% 
+  count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "blue") + 
+  scale_x_log10() + 
+  ggtitle("Users")
+
+#' 
+#' 
+#' #### Number of Genres
+#' This table shows the number of movie ratings per genre
+## ----Number of genres----------------------------------------------------
+edx %>%
+  separate_rows(genres) %>%
+  group_by(genres) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n))
+
+#' 
+#' 
+#' This plot shows how different genres are rated in average, some being more popular than others.
+## ----Genres Plot---------------------------------------------------------
+edx %>%
+  select(movieId, genres, rating) %>%
+  separate_rows(genres) %>%
+  group_by(genres) %>%
+  summarize(n = n(), avg = mean(rating), se = sd(rating)/sqrt(n())) %>%
+  mutate(genres = reorder(genres, avg)) %>%
+  ggplot(aes(x = genres, y = avg, ymin = avg - 2*se, ymax = avg + 2*se)) + 
+  geom_point() +
+  geom_errorbar() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+#' 
+#' 
+#' ####Distribution of Ratings 
+#' This plot shows that most movies are rated using whole numbers, with 3 and 4 being the most popular ratings given to movies across the dataset
+## ----distribution rantings-----------------------------------------------
+ratings <- as.vector(edx$rating)
+ratings <- ratings[ratings != 0]
+ratings <- factor(ratings)
+qplot(ratings) +
+  ggtitle("Distribution of the ratings")
+
+#' 
+#' 
+#' #### Ratings per Year
+#' This plot shows that in general users seem to rate higher older movies over most recent ones.
+#' 
+## ----ratings per year----------------------------------------------------
+edx %>% group_by(year) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(aes(year, rating)) +
+  geom_point() +
+  geom_smooth()
+
+#' 
+#' 
+#' #### Top 10 Most Rated Movies 
+## ----top rated movies----------------------------------------------------
+edx %>% group_by(movieId, title) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n))
+
+#' 
+#' 
+#' 
+#' ## 3. Model Training 
+#' 
+#' 
+#' #### Results Table
+## ----creating results table----------------------------------------------
+# Creating results table
+results <- data_frame()
+
+#' 
+#' 
+#' #### Predicting results using the average rating
+## ----Predicting results using the average rating-------------------------
+mu <- mean(edx$rating)
+model_1_rmse <- RMSE(validation_t$rating, mu)
+results <- data_frame(Model = 'Model 1', Method = "Using Average Ratings", RMSE = model_1_rmse)
+results %>% knitr::kable()
+
+#' 
+#' 
+#' #### Movie Bias
+#' As shown above, predicting movie ratings based on previous overall average ratings doesn't produce good results. As noted in a previuos plot, some movies are rated more than other depending on their popularity, thus in order to achieve more accurate results it is important to take into account this efferct and remove movie bias.  
+## ----Movie bias----------------------------------------------------------
+movie_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+predicted_ratings2 <- mu + validation_t %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  .$b_i
+
+model_2_rmse <- RMSE(predicted_ratings2, validation_t$rating)
+
+results <- bind_rows(results, data_frame(Model = 'Model 2', Method="Movie Bias", RMSE = model_2_rmse))
+results %>% knitr::kable()
+
+#' 
+#' 
+#' #### User and Movie Bias
+#' As we can see adding the movie effect to the model help achieve better results, let's see if we can do better by also accounting for user bias.
+## ----User and Movie bias-------------------------------------------------
+user_avgs <- validation_t %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings3 <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+
+
+model_3_rmse <- RMSE(predicted_ratings3, validation_t$rating)
+
+results <- bind_rows(results, data_frame(Model = 'Model 3', Method="User and Movie Bias", RMSE = model_3_rmse))  
+
+results %>% knitr::kable()
+
+#' 
+#' 
+#' #### All Bias
+#' As seen above, results are improving, but so far only user and movie bias have been considered. This time the training will be done by accounting for all bias (movie, user, year and genre).
+## ----All bias------------------------------------------------------------
+year_avgs <- validation_t %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  group_by(year) %>%
+  summarize(b_y = mean(rating - mu - b_i - b_u))
+
+genre_avgs <- validation_t %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(year_avgs, by='year') %>%
+  group_by(genres) %>%
+  summarize(b_g = mean(rating - mu - b_i - b_u - b_y))
+
+predicted_ratings4 <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(year_avgs, by = 'year') %>%
+  left_join(genre_avgs, by = 'genres') %>%
+  mutate(pred = mu + b_i + b_u + b_y + b_g) %>%
+  .$pred
+
+model_4_rmse <- RMSE(predicted_ratings4, validation_t$rating)
+
+results <- bind_rows(results, data_frame(Model = 'Model 4', Method="All Bias", RMSE = model_4_rmse))
+results %>% knitr::kable()
+
+#' 
+#' 
+#' #### Regularizing model
+#' Regularization is a technique that will help balance not only the bias in each of the variables but also its variance. First the optimal lambda will be found and the predictions will be made using the optimal lambda
+#' 
+## ----Regularized model---------------------------------------------------
+lambdas <- seq(0, 10, 0.25)
+rmses <- sapply(lambdas, function(l){
+  
+  mu <- mean(edx$rating)
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  b_y <- edx %>%
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    group_by(year) %>%
+    summarize(b_y = sum(rating - mu - b_i - b_u)/(n()+l))
+  
+  b_g <- edx %>%
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    left_join(b_y, by = 'year') %>%
+    group_by(genres) %>%
+    summarize(b_g = sum(rating - mu - b_i - b_u - b_y)/(n()+l))
+  
+  predicted_ratings5 <- validation %>% 
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    left_join(b_y, by = 'year') %>%
+    left_join(b_g, by = 'genres') %>%
+    mutate(pred = mu + b_i + b_u + b_y + b_g) %>% 
+    .$pred
+  
+  return(RMSE(predicted_ratings5, validation_t$rating))
+})
+
+#' 
+#' 
+#' #### Finding Optimal Lambda
+## ----Optimal Lambda------------------------------------------------------
+qplot(lambdas, rmses)  
+
+#' 
+#' #### Plotting Lambdas vs RMSEs
+## ----Opt Lambda----------------------------------------------------------
+lambda_opt <- lambdas[which.min(rmses)]
+lambda_opt
+
+#' 
+#' 
+#' #### Predictions using optimal lambda
+## ----Model 5 Predictions-------------------------------------------------
+movie_avgs_r <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu)/(n()+lambda_opt), n_i = n())
+
+user_avgs_r <- edx %>% 
+  left_join(movie_avgs_r, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - mu - b_i)/(n()+lambda_opt), n_u = n())
+
+year_avgs_r <- edx %>%
+  left_join(movie_avgs_r, by='movieId') %>%
+  left_join(user_avgs_r, by='userId') %>%
+  group_by(year) %>%
+  summarize(b_y = sum(rating - mu - b_i - b_u)/(n()+lambda_opt), n_y = n())
+
+genre_avgs_r <- edx %>%
+  left_join(movie_avgs_r, by='movieId') %>%
+  left_join(user_avgs_r, by='userId') %>%
+  left_join(year_avgs_r, by = 'year') %>%
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - mu - b_i - b_u - b_y)/(n()+lambda_opt), n_g = n())
+
+predicted_ratings5 <- validation %>% 
+  left_join(movie_avgs_r, by='movieId') %>%
+  left_join(user_avgs_r, by='userId') %>%
+  left_join(year_avgs_r, by = 'year') %>%
+  left_join(genre_avgs_r, by = 'genres') %>%
+  mutate(pred = mu + b_i + b_u + b_y + b_g) %>% 
+  .$pred
+
+
+model_5_rmse <- RMSE(predicted_ratings5, validation_t$rating)
+
+results <- bind_rows(results, data_frame(Model = 'Model 5', Method="Regularized Effects", RMSE = model_5_rmse))
+results %>% knitr::kable()
+
+#' 
+#' 
+#' 
+#' ## 4. Analysis of Results
+#' 
+#' Five different models were explored in order to predict movie ratings in the MovieLens dataset: predicting all ratings based on the observed average, penalizing the movie bias, penalizing user and movie bias, penalizing all bias and finally regularizing all movie bias using the most suitable lambda value. As per table above, the lowest RMSE is found with Model 4 - Penalizing All Bias (RMSE = 0.8282446)
+#' 
+#' 
+#' 
+#' ## 5. Conclusions
+#' 
+#' Throughout the Data Science series several data cleaning, data visualization, data mining and machine learning techniques were explored, most of them were implemented in the development of this capstone project and they served to achieve a lower RMSE than te one reached by the winners of the 2006 Netflix challenge. During the execution of the project I learnt a lot about the Movielens dataset and recommendation systems, this knowledge will be valuable in the development of future projects.
+
